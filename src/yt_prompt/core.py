@@ -20,6 +20,7 @@ from .formatters import (
     is_video_already_downloaded,
     save_transcript,
     save_placeholder_transcript,
+    save_missing_files_tracker,
 )
 from .browser import BrowserScraper
 

@@ -203,3 +203,59 @@ def save_placeholder_transcript(
         saved_paths["json"] = json_path
 
     return saved_paths
+
+
+def save_missing_files_tracker(
+    target_dir: str,
+    missing_items: List[Dict[str, Any]],
+    total_videos: int,
+    playlist_title: str = "Playlist",
+) -> Dict[str, str]:
+    """
+    Maintains a dedicated tracker file (missing_files.md & missing_files.json)
+    in the directory to track all videos lacking transcripts.
+    """
+    os.makedirs(target_dir, exist_ok=True)
+    md_path = os.path.join(target_dir, "missing_files.md")
+    json_path = os.path.join(target_dir, "missing_files.json")
+
+    # 1. Write Markdown tracker
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(f"# 📋 Missing Transcripts Tracker: {playlist_title}\n\n")
+        f.write(f"- **Total Videos in Playlist**: `{total_videos}`\n")
+        f.write(f"- **Downloaded Transcripts**: `{total_videos - len(missing_items)}`\n")
+        f.write(f"- **Missing Transcripts**: `{len(missing_items)}`\n\n")
+
+        if missing_items:
+            f.write("## ⚠️ Videos Lacking Subtitles on YouTube\n\n")
+            f.write("| # | Order | Video ID | Video Title | Status / Reason | YouTube URL |\n")
+            f.write("| :-: | :---: | :---: | :--- | :--- | :--- |\n")
+            for idx, item in enumerate(missing_items, start=1):
+                order_prefix = f"{item['order']:03d}"
+                title = item.get("title", "Unknown").replace("|", "\\|")
+                v_id = item.get("id", "")
+                url = item.get("url", f"https://www.youtube.com/watch?v={v_id}")
+                reason = item.get("reason", "NO_SUBTITLES_ON_YOUTUBE")
+                f.write(f"| {idx} | **#{order_prefix}** | `{v_id}` | {title} | `{reason}` | [Watch]({url}) |\n")
+            f.write("\n---\n")
+            f.write("> [!TIP]\n")
+            f.write("> You can automatically transcribe all missing videos using AI with:\n")
+            f.write("> ```bash\n")
+            f.write("> python3 main.py -t\n")
+            f.write("> ```\n")
+        else:
+            f.write("✅ **All videos in this playlist have complete transcripts! Zero missing files.**\n")
+
+    # 2. Write JSON tracker
+    data = {
+        "playlist": playlist_title,
+        "total_videos": total_videos,
+        "complete_count": total_videos - len(missing_items),
+        "missing_count": len(missing_items),
+        "missing_videos": missing_items,
+    }
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return {"md": md_path, "json": json_path}
+
