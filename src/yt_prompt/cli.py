@@ -85,8 +85,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        default="gemini-2.5-flash",
-        help="Gemini model name for LLM processing (default: 'gemini-2.5-flash')",
+        default="gemini-3.6-flash",
+        help="Gemini model name for LLM processing (default: 'gemini-3.6-flash')",
     )
     parser.add_argument(
         "--api-key",

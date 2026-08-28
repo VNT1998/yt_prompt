@@ -103,7 +103,7 @@ class TranscriptLLMProcessor:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gemini-2.5-flash",
+        model: str = "gemini-3.6-flash",
         max_retries: int = 5,
         base_delay: float = 5.0,
     ):

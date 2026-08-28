@@ -144,7 +144,7 @@ class AudioTranscriber:
         file_uri = file_info.get("uri")
 
         # Step 2: Generate Content (Transcribe)
-        gen_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}"
+        gen_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={self.api_key}"
         payload = {
             "contents": [
                 {

@@ -18,7 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description="Process transcripts through Gemini LLM into structured educational Markdown.")
     parser.add_argument("-i", "--input", default="transcripts", help="Input directory containing raw transcripts (default: 'transcripts')")
     parser.add_argument("-o", "--output", default="processed_transcripts", help="Output directory for processed markdown (default: 'processed_transcripts')")
-    parser.add_argument("-m", "--model", default="gemini-2.5-flash", help="Gemini model name (default: 'gemini-2.5-flash')")
+    parser.add_argument("-m", "--model", default="gemini-3.6-flash", help="Gemini model name (default: 'gemini-3.6-flash')")
     parser.add_argument("--force", action="store_true", help="Force re-processing even if output file already exists")
     parser.add_argument("--delay", type=float, default=2.0, help="Delay between API calls in seconds (default: 2.0)")
     parser.add_argument("--api-key", default=None, help="Gemini API Key (optional, defaults to GEMINI_API_KEY env)")
