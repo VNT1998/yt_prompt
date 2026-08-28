@@ -1,15 +1,25 @@
 """
 AI Audio Speech-to-Text Transcriber for Missing YouTube Transcripts
-Supports: Local Faster-Whisper (Offline CPU/GPU) & Cloud Gemini API
+Supports:
+1. Cloud Gemini 1.5 Flash API (Instant, zero heavy dependencies, free tier)
+2. Local Faster-Whisper (Offline CPU/GPU inference)
 """
 
 import os
+import json
+import base64
 import subprocess
 import tempfile
 import time
 from typing import List, Dict, Any, Optional
 from .formatters import format_timestamp, save_transcript
 from .parsers import sanitize_filename
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
 
 try:
     from faster_whisper import WhisperModel
@@ -80,8 +90,7 @@ def download_audio_stream(video_url: str, output_template: str) -> Optional[str]
         video_url,
     ]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        # Find the created file
+        subprocess.run(cmd, capture_output=True, text=True)
         base_dir = os.path.dirname(output_template)
         base_name = os.path.basename(output_template).replace(".%(ext)s", "")
         for created in os.listdir(base_dir):
@@ -95,28 +104,34 @@ def download_audio_stream(video_url: str, output_template: str) -> Optional[str]
 
 class AudioTranscriber:
     """
-    Transcribes audio for missing YouTube videos using local Whisper or Gemini.
+    AI Speech-to-Text Transcriber with Gemini Cloud & Local Whisper support.
     """
 
-    def __init__(self, model_size: str = "base", compute_type: str = "int8"):
+    def __init__(
+        self,
+        model_size: str = "base",
+        compute_type: str = "int8",
+        api_key: Optional[str] = None,
+    ):
         self.model_size = model_size
         self.compute_type = compute_type
-        self._model = None
+        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        self._whisper_model = None
 
     def _get_whisper_model(self):
         if not HAS_FASTER_WHISPER:
             raise RuntimeError(
                 "faster-whisper is not installed. Install via: pip install faster-whisper"
             )
-        if self._model is None:
+        if self._whisper_model is None:
             print(f"[*] Loading Faster-Whisper ({self.model_size}, {self.compute_type})...")
-            self._model = WhisperModel(
+            self._whisper_model = WhisperModel(
                 self.model_size, device="cpu", compute_type=self.compute_type
             )
-        return self._model
+        return self._whisper_model
 
-    def transcribe_file(self, audio_path: str) -> List[Dict[str, Any]]:
-        """Transcribe an audio file into timestamped segments."""
+    def transcribe_with_whisper(self, audio_path: str) -> List[Dict[str, Any]]:
+        """Transcribe an audio file using local Faster-Whisper."""
         model = self._get_whisper_model()
         segments, _ = model.transcribe(audio_path, beam_size=3)
 
@@ -128,8 +143,91 @@ class AudioTranscriber:
                 "timestamp": format_timestamp(s.start),
                 "text": s.text.strip(),
             })
-
         return formatted_segments
+
+    def transcribe_with_gemini(self, audio_path: str) -> List[Dict[str, Any]]:
+        """Transcribe an audio file using Gemini 1.5 Flash API."""
+        if not HAS_REQUESTS:
+            raise RuntimeError("requests package is required for Gemini API.")
+        if not self.api_key:
+            raise ValueError("GEMINI_API_KEY is required for Gemini transcription.")
+
+        file_size = os.path.getsize(audio_path)
+        mime_type = "audio/mp4" if audio_path.endswith(".m4a") else "audio/mp3"
+
+        # Step 1: Upload file via Resumable Upload
+        upload_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={self.api_key}"
+        headers = {
+            "X-Goog-Upload-Command": "start, upload, finalize",
+            "X-Goog-Upload-Header-Content-Length": str(file_size),
+            "X-Goog-Upload-Header-Content-Type": mime_type,
+            "Content-Type": mime_type,
+        }
+
+        with open(audio_path, "rb") as f:
+            audio_data = f.read()
+
+        resp = requests.post(upload_url, headers=headers, data=audio_data)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Gemini File Upload failed: {resp.text}")
+
+        file_info = resp.json().get("file", {})
+        file_uri = file_info.get("uri")
+
+        # Step 2: Generate Content (Transcribe)
+        gen_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}"
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": (
+                                "Please transcribe the following audio verbatim into line-separated format. "
+                                "Output strictly in this format on each line:\n"
+                                "[MM:SS] spoken text\n"
+                                "Preserve original Hindi/Hinglish/English speech accurately. Do not include markdown commentary."
+                            )
+                        },
+                        {"file_data": {"mime_type": mime_type, "file_uri": file_uri}},
+                    ]
+                }
+            ]
+        }
+
+        gen_resp = requests.post(gen_url, json=payload)
+        if gen_resp.status_code != 200:
+            raise RuntimeError(f"Gemini Transcription failed: {gen_resp.text}")
+
+        result_text = (
+            gen_resp.json()
+            .get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+        )
+
+        # Step 3: Parse response lines
+        segments = []
+        for line in result_text.split("\n"):
+            line = line.strip()
+            if line.startswith("[") and "]" in line:
+                ts = line[1 : line.find("]")].strip()
+                txt = line[line.find("]") + 1 :].strip()
+                if txt:
+                    segments.append({"timestamp": ts, "text": txt})
+
+        return segments
+
+    def transcribe_file(self, audio_path: str) -> List[Dict[str, Any]]:
+        """Auto-routes transcription to Gemini API (if key present) or local Whisper."""
+        if self.api_key:
+            try:
+                print("[*] Using Gemini 1.5 Flash Cloud Speech Engine...")
+                return self.transcribe_with_gemini(audio_path)
+            except Exception as e:
+                print(f"[!] Gemini Cloud error: {e}. Falling back to local Whisper...")
+
+        return self.transcribe_with_whisper(audio_path)
 
     def process_placeholders(
         self,
