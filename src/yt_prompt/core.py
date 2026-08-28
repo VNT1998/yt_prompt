@@ -1,5 +1,6 @@
 """
 Core YouTube Transcript Scraper with Dual Engine (API + Stealth Browser Fallback)
+and Automatic Sequence Placeholder Generation
 """
 
 import os
@@ -18,6 +19,7 @@ from .formatters import (
     format_timestamp,
     is_video_already_downloaded,
     save_transcript,
+    save_placeholder_transcript,
 )
 from .browser import BrowserScraper
 
@@ -41,6 +43,7 @@ class PlaylistScraper:
     """
     Production-grade YouTube Playlist Transcript Scraper.
     Dual Engine: Fast API -> Stealth Browser Fallback on IP Blocks.
+    Ensures 100% continuous sequential files (001 to N) with metadata placeholders.
     """
 
     def __init__(
@@ -52,6 +55,7 @@ class PlaylistScraper:
         max_retries: int = 3,
         force_overwrite: bool = False,
         proxy_url: Optional[str] = None,
+        save_placeholders: bool = True,
     ):
         self.output_dir = output_dir
         self.format_type = format_type
@@ -60,6 +64,7 @@ class PlaylistScraper:
         self.max_retries = max_retries
         self.force_overwrite = force_overwrite
         self.proxy_url = proxy_url
+        self.save_placeholders = save_placeholders
         self.browser_scraper = BrowserScraper(
             output_dir=output_dir, format_type=format_type, headless=True
         )
@@ -199,17 +204,17 @@ class PlaylistScraper:
                     print(f"[✓] Stealth Browser successfully extracted {len(browser_segments)} segments!")
                     return browser_segments, None
                 else:
-                    return None, "BROWSER_EMPTY"
+                    return None, "NO_TRANSCRIPT_ON_YOUTUBE"
             return None, str(api_err)
 
-        # Step 2: If API was empty but not disabled, try browser as final check
-        return None, "NOT_FOUND"
+        return None, "NO_TRANSCRIPT_ON_YOUTUBE"
 
     def scrape(
         self, url: str, start_from: int = 1, auto_pass2: bool = True
     ) -> Dict[str, Any]:
         """
         Scrapes all transcripts for a given playlist or single video.
+        Ensures 100% unbroken sequential files (001 to N) with placeholders when captions are absent.
         """
         os.makedirs(self.output_dir, exist_ok=True)
         v_id = extract_video_id(url)
@@ -235,7 +240,7 @@ class PlaylistScraper:
 
         if not videos:
             print("[!] No videos found.")
-            return {"total": 0, "success": 0, "skipped": 0, "failed": 0}
+            return {"total": 0, "success": 0, "skipped": 0, "failed": 0, "placeholders": 0}
 
         safe_subfolder = sanitize_filename(playlist_title)
         target_dir = os.path.join(self.output_dir, safe_subfolder)
@@ -247,12 +252,14 @@ class PlaylistScraper:
         success_count = 0
         skipped_count = 0
         disabled_count = 0
+        placeholder_count = 0
 
         print(f"[*] Destination Directory: {os.path.abspath(target_dir)}")
         print(
             f"[*] Resume Mode: {'ENABLED' if not self.force_overwrite else 'DISABLED'}"
         )
-        print(f"[*] Delay between videos: {self.delay_seconds:.1f}s\n")
+        print(f"[*] Delay between videos: {self.delay_seconds:.1f}s")
+        print(f"[*] Sequential Placeholders: {'ENABLED' if self.save_placeholders else 'DISABLED'}\n")
 
         for idx, video in enumerate(videos, start=1):
             if idx < start_from:
@@ -289,11 +296,25 @@ class PlaylistScraper:
                     format_type=self.format_type,
                 )
                 success_count += 1
-            elif reason == "DISABLED":
-                print(f"[i] Subtitles explicitly disabled by creator on YouTube for #{order_prefix} ({curr_id}).")
-                disabled_count += 1
+                print(f"[✓] Saved #{order_prefix} ({len(segments)} segments)")
             else:
-                print(f"[!] Transcript unavailable for #{order_prefix} ({curr_id}) [Reason: {reason}].")
+                if reason == "DISABLED":
+                    print(f"[i] Subtitles explicitly disabled by creator for #{order_prefix} ({curr_id}).")
+                    disabled_count += 1
+                else:
+                    print(f"[!] No subtitles available for #{order_prefix} ({curr_id}).")
+
+                if self.save_placeholders:
+                    save_placeholder_transcript(
+                        target_dir=target_dir,
+                        order_num=idx,
+                        total_count=total_videos,
+                        video_info=video,
+                        reason=reason or "NO_SUBTITLES",
+                        format_type=self.format_type,
+                    )
+                    placeholder_count += 1
+                    print(f"[📝 Placeholder Saved] Created sequential file for #{order_prefix} with video metadata.")
 
         final_files_count = (
             len(
@@ -307,11 +328,12 @@ class PlaylistScraper:
             else 0
         )
 
-        failed_count = max(0, total_videos - success_count - skipped_count)
+        failed_count = max(0, total_videos - success_count - skipped_count - placeholder_count)
         return {
             "total": total_videos,
             "success": success_count,
             "skipped": skipped_count,
+            "placeholders": placeholder_count,
             "failed": failed_count,
             "disabled": disabled_count,
             "final_files": final_files_count,

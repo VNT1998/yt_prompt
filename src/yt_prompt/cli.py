@@ -81,12 +81,13 @@ def main():
         res = scraper.scrape(args.url, start_from=args.start_from)
         print("\n" + "=" * 65)
         print(f"[✓] SUMMARY:")
-        print(f"    - Total:      {res['total']}")
-        print(f"    - Downloaded: {res['success']}")
-        print(f"    - Resumed:    {res['skipped']}")
-        print(f"    - Failed:     {res['failed']}")
+        print(f"    - Total Videos:       {res.get('total', 0)}")
+        print(f"    - Full Transcripts:   {res.get('success', 0)}")
+        print(f"    - Resumed / Existing: {res.get('skipped', 0)}")
+        print(f"    - Metadata Placeholders: {res.get('placeholders', 0)}")
+        print(f"    - Total Files in Dir: {res.get('final_files', 0)}")
         if "destination" in res:
-            print(f"    - Path:       {res['destination']}")
+            print(f"    - Path:               {res['destination']}")
         print("=" * 65)
 
 
