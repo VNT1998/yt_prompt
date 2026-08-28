@@ -32,34 +32,8 @@ class BrowserScraper:
         self.format_type = format_type
         self.headless = headless
 
-    def _create_context(self, playwright_instance):
-        """Create a stealth anti-detection browser context."""
-        chrome_bin = "/usr/bin/google-chrome" if os.path.exists("/usr/bin/google-chrome") else None
-        browser = playwright_instance.chromium.launch(
-            executable_path=chrome_bin,
-            headless=self.headless,
-            args=[
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-web-security",
-                "--window-size=1920,1080",
-            ],
-        )
-        context = browser.new_context(
-            viewport={"width": 1920, "height": 1080},
-            user_agent=DEFAULT_USER_AGENT,
-            locale="en-US",
-            timezone_id="Asia/Kolkata",
-        )
-        context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            window.chrome = { runtime: {} };
-        """)
-        return browser, context
-
     def fetch_video_transcript(self, page, video_url: str) -> Optional[List[Dict[str, Any]]]:
-        """Scrapes transcript for a single video using active Playwright page."""
+        """Scrapes transcript for a single video matching test_stealth.py exact logic."""
         try:
             page.goto(video_url, wait_until="commit", timeout=60000)
             time.sleep(6)
@@ -68,45 +42,32 @@ class BrowserScraper:
             page.evaluate("window.scrollBy(0, 800)")
             time.sleep(3)
 
-            # Expand description
+            # Expand description & click Show transcript in same evaluate block
             page.evaluate("""
                 () => {
                     const more = document.querySelector('#description-inline-expander #expand, #expand, tp-yt-paper-button#expand');
                     if (more) more.click();
-                }
-            """)
-            time.sleep(1.5)
-
-            # Click Show transcript button
-            clicked = page.evaluate("""
-                () => {
+                    
                     const btn = document.querySelector('button[aria-label="Show transcript"]')
                              || Array.from(document.querySelectorAll('button')).find(b => b.innerText && b.innerText.includes('Show transcript'));
-                    if (btn) {
-                        btn.click();
-                        return true;
-                    }
-                    return false;
+                    if (btn) btn.click();
+                }
+            """)
+            time.sleep(3)
+
+            # Extract segments
+            segments = page.evaluate("""
+                () => {
+                    const items = document.querySelectorAll('transcript-segment-view-model, ytd-transcript-segment-renderer');
+                    return Array.from(items).map(s => {
+                        const ts = s.querySelector('.ytwTranscriptSegmentViewModelTimestamp, .segment-timestamp')?.innerText.trim() || '';
+                        const txt = s.querySelector('span.ytAttributedStringHost, .segment-text')?.innerText.trim() || '';
+                        return { timestamp: ts, text: txt };
+                    }).filter(x => x.text);
                 }
             """)
 
-            # Poll for segments
-            for _ in range(6):
-                time.sleep(1.5)
-                segments = page.evaluate("""
-                    () => {
-                        const items = document.querySelectorAll('transcript-segment-view-model, ytd-transcript-segment-renderer');
-                        return Array.from(items).map(s => {
-                            const ts = s.querySelector('.ytwTranscriptSegmentViewModelTimestamp, .segment-timestamp')?.innerText.trim() || '';
-                            const txt = s.querySelector('span.ytAttributedStringHost, .segment-text')?.innerText.trim() || '';
-                            return { timestamp: ts, text: txt };
-                        }).filter(x => x.text);
-                    }
-                """)
-                if segments:
-                    return segments
-
-            return None
+            return segments if segments else None
         except Exception as e:
             print(f"[!] Browser scrape error on {video_url}: {e}")
             return None
@@ -117,7 +78,29 @@ class BrowserScraper:
             return None
 
         with sync_playwright() as p:
-            browser, context = self._create_context(p)
+            chrome_bin = "/usr/bin/google-chrome" if os.path.exists("/usr/bin/google-chrome") else None
+            browser = p.chromium.launch(
+                executable_path=chrome_bin,
+                headless=self.headless,
+                args=[
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-web-security",
+                    "--window-size=1920,1080",
+                ],
+            )
+            context = browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent=DEFAULT_USER_AGENT,
+                locale="en-US",
+                timezone_id="Asia/Kolkata",
+            )
+            context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                window.chrome = { runtime: {} };
+            """)
+
             page = context.new_page()
             segments = self.fetch_video_transcript(page, video_url)
             browser.close()
@@ -131,7 +114,29 @@ class BrowserScraper:
         os.makedirs(self.output_dir, exist_ok=True)
 
         with sync_playwright() as p:
-            browser, context = self._create_context(p)
+            chrome_bin = "/usr/bin/google-chrome" if os.path.exists("/usr/bin/google-chrome") else None
+            browser = p.chromium.launch(
+                executable_path=chrome_bin,
+                headless=self.headless,
+                args=[
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-web-security",
+                    "--window-size=1920,1080",
+                ],
+            )
+            context = browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent=DEFAULT_USER_AGENT,
+                locale="en-US",
+                timezone_id="Asia/Kolkata",
+            )
+            context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                window.chrome = { runtime: {} };
+            """)
+
             page = context.new_page()
             playlist_title = "Single_Videos"
             video_items = []
