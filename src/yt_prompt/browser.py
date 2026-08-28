@@ -1,5 +1,5 @@
 """
-Playwright Browser DOM Scraper for YouTube Modern UI
+Playwright Stealth Browser DOM Scraper for YouTube Modern UI
 """
 
 import os
@@ -7,7 +7,7 @@ import time
 from typing import List, Dict, Any, Optional
 from .parsers import sanitize_filename
 from .formatters import is_video_already_downloaded, save_transcript
-from .constants import SELECTORS, DEFAULT_USER_AGENT
+from .constants import DEFAULT_USER_AGENT
 
 try:
     from playwright.sync_api import sync_playwright
@@ -17,7 +17,10 @@ except ImportError:
 
 
 class BrowserScraper:
-    """Automates transcript scraping via Playwright browser DOM interaction."""
+    """
+    Automates transcript scraping via Playwright stealth browser DOM interaction.
+    Bypasses IP blocks and BotGuard protections.
+    """
 
     def __init__(
         self,
@@ -29,33 +32,114 @@ class BrowserScraper:
         self.format_type = format_type
         self.headless = headless
 
+    def _create_context(self, playwright_instance):
+        """Create a stealth anti-detection browser context."""
+        chrome_bin = "/usr/bin/google-chrome" if os.path.exists("/usr/bin/google-chrome") else None
+        browser = playwright_instance.chromium.launch(
+            executable_path=chrome_bin,
+            headless=self.headless,
+            args=[
+                "--no-sandbox",
+                "--disable-gpu",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-web-security",
+                "--window-size=1920,1080",
+            ],
+        )
+        context = browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent=DEFAULT_USER_AGENT,
+            locale="en-US",
+            timezone_id="Asia/Kolkata",
+        )
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            window.chrome = { runtime: {} };
+        """)
+        return browser, context
+
+    def fetch_video_transcript(self, page, video_url: str) -> Optional[List[Dict[str, Any]]]:
+        """Scrapes transcript for a single video using active Playwright page."""
+        try:
+            page.goto(video_url, wait_until="commit", timeout=60000)
+            time.sleep(6)
+
+            # Scroll down to trigger metadata loading
+            page.evaluate("window.scrollBy(0, 800)")
+            time.sleep(3)
+
+            # Expand description
+            page.evaluate("""
+                () => {
+                    const more = document.querySelector('#description-inline-expander #expand, #expand, tp-yt-paper-button#expand');
+                    if (more) more.click();
+                }
+            """)
+            time.sleep(1.5)
+
+            # Click Show transcript button
+            clicked = page.evaluate("""
+                () => {
+                    const btn = document.querySelector('button[aria-label="Show transcript"]')
+                             || Array.from(document.querySelectorAll('button')).find(b => b.innerText && b.innerText.includes('Show transcript'));
+                    if (btn) {
+                        btn.click();
+                        return true;
+                    }
+                    return false;
+                }
+            """)
+
+            # Poll for segments
+            for _ in range(6):
+                time.sleep(1.5)
+                segments = page.evaluate("""
+                    () => {
+                        const items = document.querySelectorAll('transcript-segment-view-model, ytd-transcript-segment-renderer');
+                        return Array.from(items).map(s => {
+                            const ts = s.querySelector('.ytwTranscriptSegmentViewModelTimestamp, .segment-timestamp')?.innerText.trim() || '';
+                            const txt = s.querySelector('span.ytAttributedStringHost, .segment-text')?.innerText.trim() || '';
+                            return { timestamp: ts, text: txt };
+                        }).filter(x => x.text);
+                    }
+                """)
+                if segments:
+                    return segments
+
+            return None
+        except Exception as e:
+            print(f"[!] Browser scrape error on {video_url}: {e}")
+            return None
+
+    def scrape_single(self, video_url: str) -> Optional[List[Dict[str, Any]]]:
+        """Standalone scrape for a single video using stealth browser."""
+        if not HAS_PLAYWRIGHT:
+            return None
+
+        with sync_playwright() as p:
+            browser, context = self._create_context(p)
+            page = context.new_page()
+            segments = self.fetch_video_transcript(page, video_url)
+            browser.close()
+            return segments
+
     def scrape_playlist(self, playlist_or_video_url: str):
+        """Scrapes entire playlist using persistent browser session."""
         if not HAS_PLAYWRIGHT:
             raise RuntimeError("Playwright is not installed. Install via: pip install playwright")
 
         os.makedirs(self.output_dir, exist_ok=True)
 
         with sync_playwright() as p:
-            # Use local google-chrome if available or bundled chromium
-            chrome_bin = "/usr/bin/google-chrome" if os.path.exists("/usr/bin/google-chrome") else None
-            browser = p.chromium.launch(
-                executable_path=chrome_bin,
-                headless=self.headless,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-            )
-            context = browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent=DEFAULT_USER_AGENT,
-            )
+            browser, context = self._create_context(p)
             page = context.new_page()
-
             playlist_title = "Single_Videos"
             video_items = []
 
             if "list=" in playlist_or_video_url:
                 print(f"[*] Navigating to playlist: {playlist_or_video_url}")
-                page.goto(playlist_or_video_url, wait_until="domcontentloaded")
-                time.sleep(3)
+                page.goto(playlist_or_video_url, wait_until="commit")
+                time.sleep(5)
 
                 try:
                     title_el = page.locator("yt-dynamic-sizing-formatted-string#title, h1#title").first
@@ -94,32 +178,12 @@ class BrowserScraper:
                 url = item["url"]
                 order_prefix = f"{idx:0{pad_width}d}"
 
+                if is_video_already_downloaded(target_subfolder, order_prefix, "", self.format_type):
+                    print(f"[⏩ Resumed] [{idx}/{total_videos}] #{order_prefix} already exists.")
+                    continue
+
                 print(f"\n--- [{idx}/{total_videos}] Browser fetching: {url} ---")
-                page.goto(url, wait_until="commit", timeout=60000)
-                time.sleep(3)
-
-                # Expand description
-                page.evaluate("""
-                    () => {
-                        const moreBtn = document.querySelector('#description-inline-expander #expand, #expand, tp-yt-paper-button#expand');
-                        if (moreBtn) moreBtn.click();
-                        const btn = document.querySelector('button[aria-label="Show transcript"]')
-                                 || Array.from(document.querySelectorAll('button')).find(b => b.innerText && b.innerText.includes('Show transcript'));
-                        if (btn) btn.click();
-                    }
-                """)
-                time.sleep(3)
-
-                segments = page.evaluate("""
-                    () => {
-                        const items = document.querySelectorAll('transcript-segment-view-model, ytd-transcript-segment-renderer');
-                        return Array.from(items).map(s => {
-                            const ts = s.querySelector('.ytwTranscriptSegmentViewModelTimestamp, .segment-timestamp')?.innerText.trim() || '';
-                            const txt = s.querySelector('span.ytAttributedStringHost, .segment-text')?.innerText.trim().replace(/\\s+/g, ' ') || '';
-                            return { timestamp: ts, text: txt };
-                        }).filter(x => x.text);
-                    }
-                """)
+                segments = self.fetch_video_transcript(page, url)
 
                 if segments:
                     title = page.title().replace(" - YouTube", "").strip() or item.get("title", f"video_{idx}")

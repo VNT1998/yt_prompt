@@ -1,5 +1,5 @@
 """
-Core YouTube Transcript Scraper with Auto-Resume, Multi-Pass Retry, and Anti-Ban Engine
+Core YouTube Transcript Scraper with Dual Engine (API + Stealth Browser Fallback)
 """
 
 import os
@@ -19,6 +19,7 @@ from .formatters import (
     is_video_already_downloaded,
     save_transcript,
 )
+from .browser import BrowserScraper
 
 try:
     from youtube_transcript_api import (
@@ -26,6 +27,8 @@ try:
         TranscriptsDisabled,
         NoTranscriptFound,
         VideoUnavailable,
+        IpBlocked,
+        RequestBlocked,
     )
     from youtube_transcript_api.proxies import GenericProxyConfig
     HAS_YTT = True
@@ -36,17 +39,17 @@ except ImportError:
 
 class PlaylistScraper:
     """
-    Production-grade YouTube Playlist Transcript Scraper with auto-resume,
-    anti-rate-limit cooldowns, and multi-pass recovery.
+    Production-grade YouTube Playlist Transcript Scraper.
+    Dual Engine: Fast API -> Stealth Browser Fallback on IP Blocks.
     """
 
     def __init__(
         self,
         output_dir: str = "transcripts",
         format_type: str = "txt",
-        delay_seconds: float = 2.5,
+        delay_seconds: float = 2.0,
         languages: List[str] = None,
-        max_retries: int = 4,
+        max_retries: int = 3,
         force_overwrite: bool = False,
         proxy_url: Optional[str] = None,
     ):
@@ -57,8 +60,13 @@ class PlaylistScraper:
         self.max_retries = max_retries
         self.force_overwrite = force_overwrite
         self.proxy_url = proxy_url
+        self.browser_scraper = BrowserScraper(
+            output_dir=output_dir, format_type=format_type, headless=True
+        )
 
-    def fetch_single_transcript(self, video_id: str) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    def fetch_single_transcript(
+        self, video_id: str
+    ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
         """
         Fetch transcript via youtube-transcript-api.
         Returns: (segments, status_reason)
@@ -73,7 +81,6 @@ class PlaylistScraper:
         )
         ytt = YouTubeTranscriptApi(proxy_config=proxy_config)
 
-        # 1. Try direct fetch with specified languages
         try:
             transcript_obj = ytt.fetch(video_id, languages=self.languages)
             raw_items = (
@@ -84,9 +91,17 @@ class PlaylistScraper:
             return [
                 {
                     "start": item.get("start") if isinstance(item, dict) else item.start,
-                    "duration": item.get("duration") if isinstance(item, dict) else item.duration,
-                    "timestamp": format_timestamp(item.get("start") if isinstance(item, dict) else item.start),
-                    "text": (item.get("text") if isinstance(item, dict) else item.text).replace("\n", " ").strip(),
+                    "duration": (
+                        item.get("duration") if isinstance(item, dict) else item.duration
+                    ),
+                    "timestamp": format_timestamp(
+                        item.get("start") if isinstance(item, dict) else item.start
+                    ),
+                    "text": (
+                        item.get("text") if isinstance(item, dict) else item.text
+                    )
+                    .replace("\n", " ")
+                    .strip(),
                 }
                 for item in raw_items
             ], None
@@ -96,10 +111,19 @@ class PlaylistScraper:
             return None, "UNAVAILABLE"
         except Exception as e:
             err_msg = str(e).lower()
-            if any(k in err_msg for k in ["429", "blocking requests", "ip", "too many requests", "requestblocked"]):
+            if any(
+                k in err_msg
+                for k in [
+                    "429",
+                    "blocking requests",
+                    "ip",
+                    "too many requests",
+                    "requestblocked",
+                ]
+            ):
                 raise e
 
-            # 2. Fallback: List all available transcripts
+            # Fallback: List available
             try:
                 transcript_list = ytt.list(video_id)
                 available = None
@@ -110,10 +134,22 @@ class PlaylistScraper:
                     fetched = available.fetch()
                     return [
                         {
-                            "start": item.get("start") if isinstance(item, dict) else item.start,
-                            "duration": item.get("duration") if isinstance(item, dict) else item.duration,
-                            "timestamp": format_timestamp(item.get("start") if isinstance(item, dict) else item.start),
-                            "text": (item.get("text") if isinstance(item, dict) else item.text).replace("\n", " ").strip(),
+                            "start": (
+                                item.get("start") if isinstance(item, dict) else item.start
+                            ),
+                            "duration": (
+                                item.get("duration")
+                                if isinstance(item, dict)
+                                else item.duration
+                            ),
+                            "timestamp": format_timestamp(
+                                item.get("start") if isinstance(item, dict) else item.start
+                            ),
+                            "text": (
+                                item.get("text") if isinstance(item, dict) else item.text
+                            )
+                            .replace("\n", " ")
+                            .strip(),
                         }
                         for item in fetched
                     ], None
@@ -122,46 +158,58 @@ class PlaylistScraper:
                 return None, "DISABLED"
             except Exception as inner_e:
                 inner_msg = str(inner_e).lower()
-                if any(k in inner_msg for k in ["429", "blocking requests", "ip", "requestblocked"]):
+                if any(
+                    k in inner_msg
+                    for k in ["429", "blocking requests", "ip", "requestblocked"]
+                ):
                     raise inner_e
                 return None, str(inner_e)
 
-    def fetch_with_backoff(self, video_id: str) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-        """Fetch transcript with exponential backoff on HTTP 429."""
-        backoff_delays = [20.0, 45.0, 90.0, 180.0]
-
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                segments, reason = self.fetch_single_transcript(video_id)
-                if reason in ("DISABLED", "UNAVAILABLE"):
-                    return None, reason
-                return segments, reason
-            except Exception as e:
-                err_str = str(e).lower()
-                is_rate_limited = any(
-                    k in err_str
-                    for k in ["429", "blocking requests", "too many requests", "ipblocked", "requestblocked"]
-                )
-                if is_rate_limited:
-                    wait_seconds = (
-                        backoff_delays[attempt - 1]
-                        if attempt <= len(backoff_delays)
-                        else 180.0
-                    ) + random.uniform(1.0, 5.0)
-                    print(
-                        f"[!] YouTube Rate Limit (429) hit on video {video_id}!\n"
-                        f"[⏳] Cooling down for {wait_seconds:.1f}s before retry (Attempt {attempt}/{self.max_retries})..."
-                    )
-                    time.sleep(wait_seconds)
+    def fetch_video(
+        self, video_id: str, video_url: str
+    ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+        """
+        Dual Engine Fetcher:
+        1. Fast API fetch
+        2. On IP block / HTTP 429 -> Seamless Stealth Browser DOM Fallback
+        """
+        # Step 1: Fast API attempt
+        try:
+            segments, reason = self.fetch_single_transcript(video_id)
+            if segments:
+                return segments, None
+            if reason in ("DISABLED", "UNAVAILABLE"):
+                return None, reason
+        except Exception as api_err:
+            err_str = str(api_err).lower()
+            if any(
+                k in err_str
+                for k in [
+                    "429",
+                    "blocking requests",
+                    "too many requests",
+                    "ipblocked",
+                    "requestblocked",
+                ]
+            ):
+                print(f"[!] API rate limit / IP block detected for {video_id}.")
+                print(f"[*] Switching to Stealth Browser DOM extraction for {video_url}...")
+                browser_segments = self.browser_scraper.scrape_single(video_url)
+                if browser_segments:
+                    print(f"[✓] Stealth Browser successfully extracted {len(browser_segments)} segments!")
+                    return browser_segments, None
                 else:
-                    return None, str(e)
+                    return None, "BROWSER_EMPTY"
+            return None, str(api_err)
 
-        return None, "RATE_LIMIT_EXHAUSTED"
+        # Step 2: If API was empty but not disabled, try browser as final check
+        return None, "NOT_FOUND"
 
-    def scrape(self, url: str, start_from: int = 1, auto_pass2: bool = True) -> Dict[str, Any]:
+    def scrape(
+        self, url: str, start_from: int = 1, auto_pass2: bool = True
+    ) -> Dict[str, Any]:
         """
         Scrapes all transcripts for a given playlist or single video.
-        Includes automatic pass-2 recovery for any videos that faced temporary rate limits.
         """
         os.makedirs(self.output_dir, exist_ok=True)
         v_id = extract_video_id(url)
@@ -195,14 +243,15 @@ class PlaylistScraper:
 
         total_videos = len(videos)
         pad_width = max(2, len(str(total_videos)))
-        
+
         success_count = 0
         skipped_count = 0
         disabled_count = 0
-        rate_limited_videos = []
 
         print(f"[*] Destination Directory: {os.path.abspath(target_dir)}")
-        print(f"[*] Resume Mode: {'ENABLED' if not self.force_overwrite else 'DISABLED'}")
+        print(
+            f"[*] Resume Mode: {'ENABLED' if not self.force_overwrite else 'DISABLED'}"
+        )
         print(f"[*] Delay between videos: {self.delay_seconds:.1f}s\n")
 
         for idx, video in enumerate(videos, start=1):
@@ -213,6 +262,7 @@ class PlaylistScraper:
             order_prefix = f"{idx:0{pad_width}d}"
             v_title = video.get("title", f"video_{idx}")
             curr_id = video.get("id", "")
+            curr_url = video.get("url", f"https://www.youtube.com/watch?v={curr_id}")
 
             # 1. Resume check
             if not self.force_overwrite and is_video_already_downloaded(
@@ -227,7 +277,7 @@ class PlaylistScraper:
             if self.delay_seconds > 0:
                 time.sleep(self.delay_seconds + random.uniform(0.5, 1.5))
 
-            segments, reason = self.fetch_with_backoff(curr_id)
+            segments, reason = self.fetch_video(curr_id, curr_url)
 
             if segments:
                 save_transcript(
@@ -242,52 +292,27 @@ class PlaylistScraper:
             elif reason == "DISABLED":
                 print(f"[i] Subtitles explicitly disabled by creator on YouTube for #{order_prefix} ({curr_id}).")
                 disabled_count += 1
-            elif reason == "RATE_LIMIT_EXHAUSTED":
-                print(f"[!] Cooldown exhausted on #{order_prefix} ({curr_id}). Queued for Pass 2.")
-                rate_limited_videos.append((idx, video))
-                # Cooldown barrier: pause 45s so next video doesn't immediately fail
-                print("[⏳] Pausing 45s to let YouTube IP cooldown clear...")
-                time.sleep(45)
             else:
                 print(f"[!] Transcript unavailable for #{order_prefix} ({curr_id}) [Reason: {reason}].")
 
-        # Pass 2 Recovery (if any videos were rate-limited)
-        if auto_pass2 and rate_limited_videos:
-            print("\n" + "=" * 65)
-            print(f"[*] STARTING PASS 2 FOR {len(rate_limited_videos)} RATE-LIMITED VIDEOS...")
-            print("=" * 65)
-            time.sleep(15)
+        final_files_count = (
+            len(
+                [
+                    f
+                    for f in os.listdir(target_dir)
+                    if f.endswith(f".{self.format_type}")
+                ]
+            )
+            if os.path.exists(target_dir)
+            else 0
+        )
 
-            for idx, video in rate_limited_videos:
-                order_prefix = f"{idx:0{pad_width}d}"
-                v_title = video.get("title", f"video_{idx}")
-                curr_id = video.get("id", "")
-
-                if is_video_already_downloaded(target_dir, order_prefix, curr_id, self.format_type):
-                    continue
-
-                print(f"\n--- [PASS 2] [{idx}/{total_videos}] #{order_prefix} {v_title} ({curr_id}) ---")
-                time.sleep(self.delay_seconds + 2.0)
-                segments, reason = self.fetch_with_backoff(curr_id)
-                if segments:
-                    save_transcript(
-                        target_dir=target_dir,
-                        order_num=idx,
-                        total_count=total_videos,
-                        video_info=video,
-                        segments=segments,
-                        format_type=self.format_type,
-                    )
-                    success_count += 1
-                else:
-                    print(f"[!] Pass 2 also failed for #{order_prefix} ({curr_id}) [Reason: {reason}].")
-
-        final_files_count = len([f for f in os.listdir(target_dir) if f.endswith(f".{self.format_type}")]) if os.path.exists(target_dir) else 0
-
+        failed_count = max(0, total_videos - success_count - skipped_count)
         return {
             "total": total_videos,
             "success": success_count,
             "skipped": skipped_count,
+            "failed": failed_count,
             "disabled": disabled_count,
             "final_files": final_files_count,
             "destination": target_dir,
