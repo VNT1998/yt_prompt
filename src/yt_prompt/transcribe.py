@@ -1,8 +1,9 @@
 """
 AI Audio Speech-to-Text Transcriber for Missing YouTube Transcripts
 Supports:
-1. Cloud Gemini 1.5 Flash API (Instant, zero heavy dependencies, free tier)
-2. Local Faster-Whisper (Offline CPU/GPU inference)
+1. Local Faster-Whisper (Offline CPU/GPU inference via CTranslate2)
+2. Cloud Gemini 1.5 Flash API (Instant cloud speech)
+Maintains missing_files.md / missing_files.json trackers automatically.
 """
 
 import os
@@ -12,7 +13,7 @@ import subprocess
 import tempfile
 import time
 from typing import List, Dict, Any, Optional
-from .formatters import format_timestamp, save_transcript
+from .formatters import format_timestamp, save_transcript, save_missing_files_tracker
 from .parsers import sanitize_filename
 
 try:
@@ -30,50 +31,21 @@ except ImportError:
 
 def scan_placeholders(target_dir: str) -> List[Dict[str, Any]]:
     """
-    Scans target directory and returns metadata for all placeholder files.
+    Scans target directory for missing videos by reading missing_files.json.
     """
     if not os.path.exists(target_dir):
         return []
 
-    placeholders = []
-    files = sorted(os.listdir(target_dir))
-
-    for f in files:
-        if not f.endswith(".txt"):
-            continue
-
-        full_path = os.path.join(target_dir, f)
+    json_tracker = os.path.join(target_dir, "missing_files.json")
+    if os.path.exists(json_tracker):
         try:
-            with open(full_path, "r", encoding="utf-8") as fp:
-                content = fp.read()
-                if "NO_TRANSCRIPT_AVAILABLE" in content or "NOTICE: NO SUBTITLES" in content:
-                    order = 0
-                    title = ""
-                    url = ""
-                    v_id = ""
-
-                    for line in content.split("\n"):
-                        if line.startswith("Order: "):
-                            order = int(line.replace("Order: ", "").strip())
-                        elif line.startswith("Title: "):
-                            title = line.replace("Title: ", "").strip()
-                        elif line.startswith("URL: "):
-                            url = line.replace("URL: ", "").strip()
-                        elif line.startswith("Video ID: "):
-                            v_id = line.replace("Video ID: ", "").strip()
-
-                    placeholders.append({
-                        "filename": f,
-                        "order": order,
-                        "title": title,
-                        "url": url,
-                        "id": v_id,
-                        "filepath": full_path,
-                    })
+            with open(json_tracker, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("missing_videos", [])
         except Exception:
-            continue
+            pass
 
-    return placeholders
+    return []
 
 
 def download_audio_stream(video_url: str, output_template: str) -> Optional[str]:
@@ -82,17 +54,14 @@ def download_audio_stream(video_url: str, output_template: str) -> Optional[str]
     """
     cmd = [
         "yt-dlp",
-        "-f", "bestaudio/ba",
-        "-x",
-        "--audio-format", "m4a",
-        "--audio-quality", "5",
+        "-f", "ba[ext=m4a]/bestaudio/ba",
         "-o", output_template,
         video_url,
     ]
     try:
         subprocess.run(cmd, capture_output=True, text=True)
         base_dir = os.path.dirname(output_template)
-        base_name = os.path.basename(output_template).replace(".%(ext)s", "")
+        base_name = os.path.basename(output_template).replace(".%(ext)s", "").replace(".m4a", "")
         for created in os.listdir(base_dir):
             if created.startswith(base_name):
                 return os.path.join(base_dir, created)
@@ -121,7 +90,7 @@ class AudioTranscriber:
     def _get_whisper_model(self):
         if not HAS_FASTER_WHISPER:
             raise RuntimeError(
-                "faster-whisper is not installed. Install via: pip install faster-whisper"
+                "faster-whisper is not installed. Install via: uv pip install faster-whisper"
             )
         if self._whisper_model is None:
             print(f"[*] Loading Faster-Whisper ({self.model_size}, {self.compute_type})...")
@@ -236,33 +205,35 @@ class AudioTranscriber:
         format_type: str = "txt",
     ) -> Dict[str, Any]:
         """
-        Scans directory, transcribes all placeholder files, and replaces them.
+        Transcribes all missing videos from tracker and updates missing_files records.
         """
-        placeholders = scan_placeholders(target_dir)
-        print(f"[*] Found {len(placeholders)} placeholder files to transcribe.")
+        missing_items = scan_placeholders(target_dir)
+        print(f"[*] Found {len(missing_items)} missing videos to transcribe.")
 
-        if not placeholders:
-            print("[✓] No placeholders found. All files are complete!")
+        if not missing_items:
+            print("[✓] No missing videos found. All files are complete!")
             return {"transcribed": 0, "total": 0}
 
         success_count = 0
-        with tempfile.TemporaryDirectory() as temp_dir:
-            for idx, item in enumerate(placeholders, start=1):
-                order_num = item["order"]
-                v_title = item["title"]
-                v_id = item["id"]
-                v_url = item["url"]
-                old_file = item["filepath"]
+        remaining_missing = []
 
-                print(f"\n--- [{idx}/{len(placeholders)}] AI Transcribing: #{order_num:03d} {v_title} ({v_id}) ---")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for idx, item in enumerate(missing_items, start=1):
+                order_num = item["order"]
+                v_title = item.get("title", f"video_{order_num}")
+                v_id = item.get("id", "")
+                v_url = item.get("url", f"https://www.youtube.com/watch?v={v_id}")
+
+                print(f"\n--- [{idx}/{len(missing_items)}] AI Transcribing: #{order_num:03d} {v_title} ({v_id}) ---")
 
                 # Step 1: Download audio
-                audio_template = os.path.join(temp_dir, f"audio_{v_id}.%(ext)s")
+                audio_template = os.path.join(temp_dir, f"audio_{v_id}.m4a")
                 print(f"[*] Downloading audio stream from YouTube...")
                 audio_path = download_audio_stream(v_url, audio_template)
 
                 if not audio_path or not os.path.exists(audio_path):
                     print(f"[!] Failed to download audio for #{order_num:03d}.")
+                    remaining_missing.append(item)
                     continue
 
                 # Step 2: Transcribe audio
@@ -270,10 +241,6 @@ class AudioTranscriber:
                 try:
                     segments = self.transcribe_file(audio_path)
                     print(f"[✓] Successfully transcribed {len(segments)} segments!")
-
-                    # Remove old placeholder file
-                    if os.path.exists(old_file):
-                        os.remove(old_file)
 
                     # Save real transcript
                     video_info = {"id": v_id, "title": v_title, "url": v_url}
@@ -288,6 +255,7 @@ class AudioTranscriber:
                     success_count += 1
                 except Exception as e:
                     print(f"[!] Transcription failed for #{order_num:03d}: {e}")
+                    remaining_missing.append(item)
                 finally:
                     # Clean temp audio
                     if audio_path and os.path.exists(audio_path):
@@ -296,4 +264,12 @@ class AudioTranscriber:
                         except Exception:
                             pass
 
-        return {"transcribed": success_count, "total": len(placeholders)}
+        # Update missing_files.md & missing_files.json
+        save_missing_files_tracker(
+            target_dir=target_dir,
+            missing_items=remaining_missing,
+            total_videos=total_videos,
+            playlist_title=os.path.basename(target_dir),
+        )
+
+        return {"transcribed": success_count, "total": len(missing_items)}

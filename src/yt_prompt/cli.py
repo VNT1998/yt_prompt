@@ -14,7 +14,7 @@ from .parsers import sanitize_filename, fetch_playlist_metadata
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="yt-prompt",
-        description="Scrape YouTube Playlist Transcripts with auto-resume, rate-limit protection, and AI audio transcription.",
+        description="Scrape YouTube Playlist Transcripts with auto-resume, anti-ban rate limiting, and missing files tracking.",
     )
     parser.add_argument("url", nargs="?", default=None, help="YouTube Playlist or Video URL")
     parser.add_argument(
@@ -34,8 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
         "-d",
         "--delay",
         type=float,
-        default=2.0,
-        help="Delay in seconds between video requests for anti-ban rate limiting (default: 2.0)",
+        default=45.0,
+        help="Delay in seconds between video requests for anti-ban rate limiting (default: 45.0)",
     )
     parser.add_argument(
         "-s",
@@ -63,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-t",
         "--transcribe-missing",
         action="store_true",
-        help="Use AI speech-to-text (Faster-Whisper) to transcribe any placeholder files lacking YouTube subtitles",
+        help="Use AI speech-to-text to transcribe any missing videos in the playlist",
     )
     parser.add_argument(
         "--whisper-model",
@@ -104,13 +104,14 @@ def main():
             print(f"    - Total Videos:          {res.get('total', 0)}")
             print(f"    - Full Transcripts:      {res.get('success', 0)}")
             print(f"    - Resumed / Existing:    {res.get('skipped', 0)}")
-            print(f"    - Metadata Placeholders: {res.get('placeholders', 0)}")
+            print(f"    - Missing Transcripts:   {res.get('missing', 0)}")
             print(f"    - Total Files in Dir:    {res.get('final_files', 0)}")
             if "destination" in res:
-                print(f"    - Path:                  {res['destination']}")
+                print(f"    - Folder Path:           {res['destination']}")
+                print(f"    - Missing Tracker:       {os.path.join(res['destination'], 'missing_files.md')}")
             print("=" * 65)
 
-            if args.transcribe_missing and res.get("placeholders", 0) > 0:
+            if args.transcribe_missing and res.get("missing", 0) > 0:
                 target_folder = res.get("destination", args.output)
                 transcriber = AudioTranscriber(model_size=args.whisper_model)
                 transcriber.process_placeholders(
@@ -120,7 +121,6 @@ def main():
                 )
 
     elif args.transcribe_missing:
-        # Standalone transcribe on output directory
         target_dir = args.output
         if os.path.exists(target_dir):
             subdirs = [
@@ -130,9 +130,9 @@ def main():
             ]
             folders_to_check = subdirs if subdirs else [target_dir]
             for folder in folders_to_check:
-                placeholders = scan_placeholders(folder)
-                if placeholders:
-                    print(f"\n[*] Transcribing {len(placeholders)} placeholders in '{folder}'...")
+                missing_items = scan_placeholders(folder)
+                if missing_items:
+                    print(f"\n[*] Transcribing {len(missing_items)} missing videos in '{folder}'...")
                     transcriber = AudioTranscriber(model_size=args.whisper_model)
                     transcriber.process_placeholders(
                         target_dir=folder,
